@@ -1,0 +1,439 @@
+=========================================
+TUTORIAL MENAMPILKAN DATA
+Aplikasi: Peminjaban Alat / GameVault (UKK RPL - Laravel)
+=========================================
+
+Halo! Tutorial ini menjelaskan langkah demi langkah
+bagaimana cara menampilkan data di project Laravel Anda.
+
+Project ini adalah aplikasi peminjaman alat/konsol dengan:
+- Backend: Laravel 11/12 (PHP 8.3) + Eloquent (MySQL)
+- Frontend: Blade + Bootstrap 5 (template "Sneat") + Vite
+- Tidak pakai API, semua halaman dirender langsung via Blade.
+
+Alur dasar menampilkan data di project ini:
+  Request -> Route -> Controller -> Eloquent Model -> View (Blade) -> Response HTML
+
+
+BAB 1: SIAPAN LINGKUNGAN (wajib sebelum menampilkan data)
+
+  composer install
+  npm install
+  cp .env.example .env
+  php artisan key:generate
+  php artisan migrate --seed
+  npm run build
+  php artisan serve
+
+
+=========================================
+LANGKAH 1: MENENTUKAN DATA YANG AKAN DITAMPILKAN
+=========================================
+
+Pilih halaman / fitur mana yang ingin Anda tampilkan.
+Contoh di project ini:
+  - Data kategori        -> halaman Admin (CRUD kategori)
+  - Data objek/konsol    -> halaman Admin (CRUD objek)
+  - Data pengguna        -> halaman Admin (CRUD user)
+  - Pengajuan peminjaman -> halaman pengguna / petugas / admin
+  - Persetujuan          -> halaman petugas / admin
+  - Pengembalian         -> halaman petugas / admin
+  - Laporan              -> halaman petugas / admin
+  - Log aktivitas        -> halaman admin
+  - Dashboard            -> ringkasan statistik
+
+
+=========================================
+LANGKAH 2: MEMBUAT / MENGEMODIFIKASI ROUTE
+=========================================
+
+File: routes/web.php
+
+  Route::get('/', [DashboardController::class, 'index'])->name('dashboard');
+
+  Route::resource('categories', CategoryController::class)->except('show');
+
+  Route::resource('consoles', ConsoleController::class)->except('show');
+
+  Route::resource('users', UserController::class)->except('show');
+
+  Route::resource('transactions', TransactionController::class)
+      ->only(['index', 'create', 'store', 'show']);
+
+  Route::get('persetujuan', [ApprovalController::class, 'index'])->name('persetujuan.index');
+  Route::post('persetujuan/{transaction}/setujui', ...)->name('persetujuan.setujui');
+  Route::post('persetujuan/{transaction}/tolak', ...)->name('persetujuan.tolak');
+  Route::post('persetujuan/{transaction}/pinjam', ...)->name('persetujuan.pinjam');
+
+  Route::get('pengembalian', [ReturnController::class, 'index'])->name('pengembalian.index');
+  Route::get('pengembalian/{transaction}/kembalikan', ...)->name('pengembalian.create');
+  Route::post('pengembalian/{transaction}/kembalikan', ...)->name('pengembalian.store');
+
+  Route::get('log-aktivitas', [ActivityLogController::class, 'index'])->name('log-aktivitas.index');
+  Route::get('laporan', [ReportController::class, 'index'])->name('laporan.index');
+  Route::get('laporan/cetak', [ReportController::class, 'cetak'])->name('laporan.cetak');
+  Route::get('laporan/export', [ReportController::class, 'export'])->name('laporan.export');
+
+  Semua route setelah login ada di dalam group middleware('auth').
+
+  Untuk route baru, contoh:
+    Route::get('/buku', [BukuController::class, 'index'])->name('buku.index');
+    Route::post('/buku', [BukuController::class, 'store']);
+
+  Atau pakai resource controller:
+    Route::resource('categories', CategoryController::class)->except('show');
+
+
+=========================================
+LANGKAH 3: MEMBUAT METHOD index DI CONTROLLER
+=========================================
+
+File: app/Http/Controllers/CategoryController.php
+
+  public function index(Request $request): View
+  {
+      $this->cekRole('admin');
+
+      $query = Category::withCount('consoles');
+
+      if ($request->query('q')) {
+          $query->where('name', 'like', '%'.$request->query('q').'%');
+      }
+
+      $categories = $query->orderBy('name')->paginate(10)->withQueryString();
+
+      return view('categories.index', [
+          'categories' => $categories,
+          'cari' => $request->query('q'),
+      ]);
+  }
+
+Catatan penting di dalam query:
+  1. cekRole('admin') -> membatasi akses, dari Controller base (app/Http/Controllers/Controller.php)
+  2. withCount('consoles') -> eager loading + menghitung jumlah relasi (consoles_count)
+  3. where('name', 'like', '%'.$request->query('q').'%') -> pencarian
+  4. paginate(10) -> pagination, 10 data per halaman
+  5. withQueryString() -> biarkan query ?q=... tetap utuh saat paginasi
+  6. orderBy('name') -> urut data
+
+
+=========================================
+LANGKAH 4: CONTOH QUERY UNTUK HALAMAN TRANSAKSI
+=========================================
+
+File: app/Http/Controllers/TransactionController.php
+
+  public function index(): View
+  {
+      $this->cekRole('pengguna');
+
+      $transactions = Transaction::with('console')
+          ->where('user_id', auth()->id())
+          ->orderByDesc('id')
+          ->paginate(10);
+
+      return view('transactions.index', compact('transactions'));
+  }
+
+Untuk halaman detail (show), selalu load relasi yang dipakai di view:
+
+  public function show(Transaction $transaction): View
+  {
+      $this->cekRole('pengguna', 'petugas', 'admin');
+
+      if (auth()->user()->isPengguna() && $transaction->user_id !== auth()->id()) {
+          abort(403, 'Pengajuan ini bukan milik Anda.');
+      }
+
+      $transaction->load(['console.category', 'approver', 'retur']);
+
+      return view('transactions.show', compact('transaction'));
+  }
+
+
+=========================================
+LANGKAH 5: KIRIM DATA KE VIEW
+=========================================
+
+  return view('categories.index', [
+      'categories' => $categories,
+      'cari' => $request->query('q'),
+  ]);
+
+Atau singkat pakai compact():
+
+  return view('transactions.index', compact('transactions'));
+
+  return view('transactions.show', compact('transaction'));
+
+
+=========================================
+LANGKAH 6: TAMPILKAN DATA DI VIEW BLADE
+=========================================
+
+File: resources/views/categories/index.blade.php
+
+  @extends('layouts.app')
+
+  @section('title', 'Data Kategori')
+
+  @section('content')
+    <div class="row">
+      <div class="col-12">
+        <div class="card">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">Data Kategori</h5>
+            <a href="{{ route('categories.create') }}" class="btn btn-primary btn-sm">
+              <i class="bx bx-plus me-1"></i> Tambah Kategori
+            </a>
+          </div>
+
+          <div class="table-responsive text-nowrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>No</th>
+                  <th>Nama</th>
+                  <th>Slug</th>
+                  <th>Deskripsi</th>
+                  <th>Jumlah Objek</th>
+                  <th>Aksi</th>
+                </tr>
+              </thead>
+              <tbody class="table-border-bottom-0">
+                @forelse ($categories as $category)
+                  <tr>
+                    <td>{{ $categories->firstItem() + $loop->index }}</td>
+                    <td><strong>{{ $category->name }}</strong></td>
+                    <td>{{ $category->slug }}</td>
+                    <td>{{ $category->description ?? '-' }}</td>
+                    <td><span class="badge bg-label-primary">{{ $category->consoles_count }}</span></td>
+                    <td>
+                      <a href="{{ route('categories.edit', $category) }}" class="btn btn-sm btn-warning">Edit</a>
+                      <form action="{{ route('categories.destroy', $category) }}" method="POST" class="d-inline" onsubmit="return confirm('Hapus kategori ini?')">
+                        @csrf
+                        @method('DELETE')
+                        <button class="btn btn-sm btn-danger" type="submit">Hapus</button>
+                      </form>
+                    </td>
+                  </tr>
+                @empty
+                  <tr>
+                    <td colspan="6" class="text-center text-muted">Belum ada data kategori.</td>
+                  </tr>
+                @endforelse
+              </tbody>
+            </table>
+          </div>
+
+          @if ($categories->hasPages())
+            <div class="card-body">
+              {{ $categories->links() }}
+            </div>
+          @endif
+        </div>
+      </div>
+    </div>
+  @endsection
+
+Penjelasan Blade yang dipakai:
+  - @extends('layouts.app')          -> memanggil layout utama
+  - @section('title', '...')         -> judul halaman
+  - @section('content')              -> isi konten
+  - @forelse ($data as $item)       -> loop data, @empty -> tampil kalau tidak ada data
+  - {{ $data->firstItem() + $loop->index }} -> nomor urut
+  - {{ route('nama.route', $item) }} -> generate URL via nama route
+  - {{ $data->links() }}              -> pagination
+
+
+=========================================
+LANGKAH 7: TAMPILKAN BADGE STATUS
+=========================================
+
+File: resources/views/partials/badge-status.blade.php
+
+  @php
+    $warna = [
+        'pending' => 'warning',
+        'approved' => 'info',
+        'borrowed' => 'primary',
+        'returned' => 'success',
+        'rejected' => 'danger',
+        'cancelled' => 'secondary',
+        'late' => 'danger',
+    ];
+  @endphp
+  <span class="badge bg-label-{{ $warna[$status] }}">{{ App\Models\Transaction::daftarStatus()[$status] }}</span>
+
+Penggunaan di view tabel:
+
+  <td>@include('partials.badge-status', ['status' => $transaction->status])</td>
+
+Atau bisa langsung:
+
+  <td><span class="badge bg-label-{{ $transaction->status === 'pending' ? 'warning' : 'success' }}">{{ $transaction->labelStatus() }}</span></td>
+
+Fungsi labelStatus() ada di model:
+  App\Models\Transaction::daftarStatus() -> array status => label
+  $transaction->labelStatus() -> ambil label dari status
+
+
+=========================================
+LANGKAH 8: FORMAT DATA (TANGGAL & RUPIAH)
+=========================================
+
+  {{ $transaction->rental_date->format('d-m-Y') }}
+  {{ $transaction->return_date->format('d-m-Y') }}
+  {{ $transaction->total_days }} hari
+  Rp {{ number_format($transaction->total_price, 0, ',', '.') }}
+
+  Carbon dipakai untuk perhitungan tanggal:
+    use Carbon\Carbon;
+    $totalHari = (int) Carbon::parse($data['rental_date'])->diffInDays(Carbon::parse($data['return_date']));
+
+  Model Transaction sudah pakai casts untuk tanggal & angka:
+    protected function casts(): array
+    {
+        return [
+            'rental_date' => 'date',
+            'return_date' => 'date',
+            'start_time' => 'datetime',
+            'end_time' => 'datetime',
+            'total_days' => 'integer',
+            'total_price' => 'decimal:2',
+            'deposit' => 'decimal:2',
+            'fine' => 'decimal:2',
+        ];
+    }
+
+
+=========================================
+LANGKAH 9: TAMPILKAN DASHBOARD / STATISTIK
+=========================================
+
+File: app/Http/Controllers/DashboardController.php
+
+  public function index(): View
+  {
+      $user = auth()->user();
+
+      if ($user->isPengguna()) {
+          return view('dashboard.pengguna', [
+              'totalPengajuan' => Transaction::where('user_id', $user->id)->count(),
+              'menunggu' => Transaction::where('user_id', $user->id)->where('status', 'pending')->count(),
+              'dipinjam' => Transaction::where('user_id', $user->id)->where('status', 'borrowed')->count(),
+              'selesai' => Transaction::where('user_id', $user->id)->where('status', 'returned')->count(),
+          ]);
+      }
+
+      if ($user->isPetugas()) {
+          return view('dashboard.petugas', [
+              'menunggu' => Transaction::where('status', 'pending')->count(),
+              'disetujui' => Transaction::where('status', 'approved')->count(),
+              'dipinjam' => Transaction::where('status', 'borrowed')->count(),
+              'terlambat' => Transaction::where('status', 'late')->count(),
+          ]);
+      }
+
+      return view('dashboard.admin', [
+          'totalKategori' => Category::count(),
+          'totalObjek' => Console::count(),
+          'objekTersedia' => Console::where('status', 'available')->count(),
+          'totalUser' => User::count(),
+          'menunggu' => Transaction::where('status', 'pending')->count(),
+          'dipinjam' => Transaction::where('status', 'borrowed')->count(),
+          'aktivitasTerbaru' => ActivityLog::with('user')->orderByDesc('id')->limit(5)->get(),
+          'objekPopuler' => Console::withCount('transactions')->orderByDesc('transactions_count')->limit(5)->get(),
+      ]);
+  }
+
+Untuk dashboard, data ditampilkan sebagai kartu (card) dan tabel kecil di view Blade.
+
+
+=========================================
+LANGKAH 10: MENJALANKAN DAN MENGHILANGKAN HASIL
+=========================================
+
+  php artisan serve
+  # buka http://127.0.0.1:8000
+
+  Login demo (password: password):
+    - budi@gamevault.test        -> admin
+    - andi@example.test          -> petugas
+    - arrofiryanto@gmail.com     -> pengguna
+
+  Atau jalankan via:
+    composer run dev
+
+
+=========================================
+CONTOH URUTAN LENYAP UNTUK MENAMPILKAN 1 DATA
+=========================================
+
+  1. routes/web.php
+       -> daftarkan route untuk resource / custom route
+
+  2. app/Http/Controllers/XxxController.php
+       -> method index(): query Eloquent -> paginate -> with -> return view
+
+  3. resources/views/xxx/index.blade.php
+       -> @extends('layouts.app')
+       -> @section('content')
+           -> @forelse ($data as $item) ... @empty ... @endforelse
+           -> {{ $data->links() }}
+
+  4. resources/views/partials/badge-status.blade.php (jika pakai status)
+
+  5. app/Models/ -> pastikan relasi + casts sudah benar
+
+  6. php artisan serve -> cek di browser
+
+
+=========================================
+TROUBLESHOOTING / ERROR YANG SERING KELIHIRAN
+
+  1. Error "Attempted to read property on null" -> relasi belum di-load.
+        Solusi: tambahkan with('relasi') di query, contoh:
+        Transaction::with('console')->...
+
+  2. Error "Class not found" -> cek use statement di controller.
+
+  3. Data tidak muncul di view -> pastikan nama variable yang di-pass ke view
+     sama persis dengan yang dipakai di Blade.
+
+  4. Pagination tidak tampil -> pastikan pakai $data->links() dan
+     periksa package Laravel 11+ (default sudah ada).
+
+  5. Search tidak jalan -> pastikan form GET ke route yang sama dan
+     pakai ->withQueryString().
+
+  6. 403 saat akses -> cek cekRole() di controller dan role user-nya.
+
+  7. Tampilan kosong setelah data ada -> cek @forelse ... @empty, hapus cache:
+        php artisan optimize:clear
+
+
+=========================================
+PERINTAH CLI LAIN YANG RELEVAN
+
+  php artisan route:list
+  php artisan migrate --seed
+  php artisan serve
+  php artisan test --compact
+
+
+=========================================
+CATATAN PENTING
+
+  - Semua controller di project ini mengembalikan View (Blade), BUKAN JSON.
+  - Gunakan Eloquent, bukan query SQL mentah, untuk konsistensi.
+  - Prioritaskan eager loading (with) untuk menghindari N+1 query.
+  - Gunakan Form Request untuk validasi jika data masuk dari form.
+  - Pagination wajib untuk data banyak (paginate, bukan get()).
+
+=========================================
+AKHIR TUTORIAL
+=========================================
+
+Semoga tutorial ini membantu Anda menampilkan data di project Laravel Anda.
+Jika ingin menambahkan fitur menampilkan data baru, ikuti 10 langkah di atas.
